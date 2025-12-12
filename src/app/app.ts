@@ -9,7 +9,10 @@ interface ZoomRuntimeConfig {
   signature: string;
   meetingNumber: string;
   passWord: string;
-  zak: string;
+  userName: string;
+  userEmail?: string;
+  tk?: string;
+  zak?: string;
 }
 
 /**
@@ -43,6 +46,10 @@ export class App implements OnInit {
       throw new Error('Zoom runtime config is missing');
     }
     this.config = cfg;
+
+    if (this.config.tk && !this.config.userEmail) {
+      throw new Error('Zoom runtime config requires userEmail when tk is provided');
+    }
   }
 
   /**
@@ -83,18 +90,28 @@ export class App implements OnInit {
    * Joins the configured meeting and surfaces the result for easier debugging.
    */
   private join(): void {
-    ZoomMtg.join({
+    const joinOptions: any = {
       signature: this.config.signature,
       meetingNumber: this.config.meetingNumber,
       passWord: this.config.passWord,
-      userName: 'Bot',
-      zak: this.config.zak,
+      userName: this.config.userName,
       success: (res: unknown) => {
         console.log('[ZOOM] join success', res);
       },
       error: (err: unknown) => {
         console.error('[ZOOM] join error', err);
       }
-    });
+    };
+
+    if (this.config.tk) {
+      joinOptions.tk = this.config.tk;
+      joinOptions.userEmail = this.config.userEmail;
+    }
+
+    if (this.config.zak) {
+      joinOptions.zak = this.config.zak;
+    }
+
+    ZoomMtg.join(joinOptions);
   }
 }

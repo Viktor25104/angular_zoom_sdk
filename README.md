@@ -34,13 +34,16 @@ The Zoom SDK pulls every sensitive value from `public/zoom-config.js` at runtime
 ```js
 window.__ZOOM_CONFIG__ = {
   sdkKey: 'YOUR_SDK_KEY',
-  signature: 'JWT_GENERATED_ON_YOUR_BACKEND',
+  signature: 'JWT_GENERATED_ON_YOUR_BACKEND', // role 1 to start, 0 to join
   meetingNumber: '123456789',
   passWord: 'secure-passcode',
-  zak: 'HOST_ZAK_TOKEN'
+  userName: 'Bot',
+  userEmail: '', // only fill when tk is set
+  tk: '',        // registrant token for meetings with required registration
+  zak: ''        // host/authorized-user ZAK token (optional)
 };
 ```
-Never commit production credentials. For automated deployments, inject the same structure via an inline `<script>` tag or a server-side template that writes to `window.__ZOOM_CONFIG__`.
+`signature`, `meetingNumber`, `passWord`, and `userName` are always required. Provide `tk` **and** `userEmail` when the meeting enforces registration; provide `zak` when you start the meeting or when the host requires authenticated joins. Never commit production credentials. For automated deployments, inject the same structure via an inline `<script>` tag or a server-side template that writes to `window.__ZOOM_CONFIG__`.
 
 ## Development & Testing Workflow
 - `npm start` - launches the Angular dev server with live reload and verbose logging.
