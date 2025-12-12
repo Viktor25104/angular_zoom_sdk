@@ -1,3 +1,7 @@
+/**
+ * Local development credentials consumed by the Angular host through `window.__ZOOM_CONFIG__`.
+ * Replace every field with environment-specific values before running or deploying the app.
+ */
 window.__ZOOM_CONFIG__ = {
   sdkKey: 'GmwolhCqQ0OOaKpr0OrElg',
   signature: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBrZXkiOiJHbXdvbGhDcVEwT09hS3ByME9yRWxnIiwic2RrS2V5IjoiR213b2xoQ3FRME9PYUtwcjBPckVsZyIsIm1uIjoiODUyNDg3MjIxNDkiLCJyb2xlIjoxLCJpYXQiOjE3NjUzNTMzNzQsImV4cCI6MTc2NTM1NTE3NCwidG9rZW5FeHAiOjE3NjUzNTUxNzR9.RhX0NPrmDBikBKcR34UyoF3G-hlZqXdNmblpA7H3Dso',
