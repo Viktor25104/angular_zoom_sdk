@@ -313,7 +313,10 @@ export class WsControlService {
     this.initTimeoutHandle = null;
 
     if (this.hasZoomDomContent()) {
-      console.log('[WS] INIT timeout skipped: Zoom UI detected');
+      console.log('[WS] INIT timeout satisfied via Zoom UI render');
+      this.zoomInitializing = false;
+      this.zoomInitialized = true;
+      this.sendInitResponse('OK');
       return;
     }
 
