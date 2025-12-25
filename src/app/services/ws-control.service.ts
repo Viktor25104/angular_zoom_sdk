@@ -1,6 +1,23 @@
 import { Injectable, NgZone, signal } from '@angular/core';
+import { ZoomMtg } from '@zoom/meetingsdk';
 
 type WsStatus = 'connecting' | 'connected' | 'disconnected';
+
+interface ZoomInitPayload {
+  sdkKey: string;
+  signature: string;
+  meetingNumber: string;
+  passWord: string;
+  userName: string;
+  userEmail?: string;
+  tk?: string;
+  zak?: string;
+}
+
+interface WsCommand<T = unknown> {
+  type: string;
+  payload?: T;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -13,6 +30,9 @@ export class WsControlService {
 
   private socket?: WebSocket;
   private readonly wsUrl = 'ws://localhost:8081';
+  private zoomConfig?: ZoomInitPayload;
+  private zoomInitialized = false;
+  private zoomInitializing = false;
 
   constructor(private readonly ngZone: NgZone) {
     this.openSocket();
@@ -52,7 +72,12 @@ export class WsControlService {
     this.socket.addEventListener('message', (event) => {
       this.ngZone.run(() => {
         console.log('[WS] MESSAGE RECEIVED');
-        console.log('WS COMMAND:', event.data);
+        const command = this.parseCommand(event.data);
+        if (!command) {
+          return;
+        }
+        console.log('WS COMMAND:', command);
+        this.routeCommand(command);
       });
     });
   }
@@ -62,6 +87,135 @@ export class WsControlService {
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(payload);
     }
+  }
+
+  private sendMessage(message: Record<string, unknown>): void {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      console.warn('[WS] cannot send message, socket not open', message);
+      return;
+    }
+    this.socket.send(JSON.stringify(message));
+  }
+
+  private parseCommand(raw: unknown): WsCommand | null {
+    if (typeof raw !== 'string') {
+      console.error('[WS] unexpected non-string message payload', raw);
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw) as WsCommand;
+    } catch (err) {
+      console.error('[WS] failed to parse message JSON', err);
+      return null;
+    }
+  }
+
+  private routeCommand(command: WsCommand): void {
+    switch (command.type) {
+      case 'INIT':
+        this.handleInitCommand(command.payload);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private handleInitCommand(payload: unknown): void {
+    if (this.zoomInitializing) {
+      this.sendInitResponse('ERROR', 'Zoom SDK initialization already in progress');
+      return;
+    }
+
+    if (this.zoomInitialized) {
+      this.sendInitResponse('ERROR', 'Zoom SDK already initialized');
+      return;
+    }
+
+    const validatedPayload = this.validateInitPayload(payload);
+    if (!validatedPayload) {
+      return;
+    }
+
+    this.zoomConfig = validatedPayload;
+    this.zoomInitializing = true;
+
+    this.ngZone.runOutsideAngular(() => {
+      try {
+        ZoomMtg.preLoadWasm();
+        ZoomMtg.prepareWebSDK();
+        ZoomMtg.i18n.load('en-US');
+        ZoomMtg.i18n.reload('en-US');
+      } catch (err) {
+        this.ngZone.run(() => {
+          this.zoomInitializing = false;
+          this.sendInitResponse('ERROR', this.toErrorMessage(err));
+        });
+        return;
+      }
+
+      ZoomMtg.init({
+        leaveUrl: 'https://www.zoom.com/',
+        disableCORP: true,
+        isSupportAV: true,
+        success: () => {
+          this.ngZone.run(() => {
+            this.zoomInitializing = false;
+            this.zoomInitialized = true;
+            this.sendInitResponse('OK');
+          });
+        },
+        error: (err: unknown) => {
+          this.ngZone.run(() => {
+            this.zoomInitializing = false;
+            this.sendInitResponse('ERROR', this.toErrorMessage(err));
+          });
+        }
+      });
+    });
+  }
+
+  private validateInitPayload(payload: unknown): ZoomInitPayload | null {
+    if (!payload || typeof payload !== 'object') {
+      this.sendInitResponse('ERROR', 'INIT payload must be an object');
+      return null;
+    }
+
+    const candidate = payload as Partial<ZoomInitPayload>;
+    const required: Array<keyof ZoomInitPayload> = [
+      'sdkKey',
+      'signature',
+      'meetingNumber',
+      'passWord',
+      'userName'
+    ];
+    const missing = required.filter((field) => !candidate[field]);
+    if (missing.length > 0) {
+      this.sendInitResponse('ERROR', `Missing required fields: ${missing.join(', ')}`);
+      return null;
+    }
+
+    return candidate as ZoomInitPayload;
+  }
+
+  private sendInitResponse(status: 'OK' | 'ERROR', error?: string): void {
+    const message: Record<string, unknown> = {
+      type: 'INIT_DONE',
+      status
+    };
+
+    if (error) {
+      message.error = error;
+    }
+
+    this.sendMessage(message);
+  }
+
+  private toErrorMessage(err: unknown): string {
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return typeof err === 'string' ? err : 'Unknown Zoom SDK error';
   }
 
   private setStatus(status: WsStatus): void {
