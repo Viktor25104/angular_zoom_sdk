@@ -160,9 +160,7 @@ export class WsControlService {
         isSupportAV: true,
         success: () => {
           this.ngZone.run(() => {
-            this.zoomInitializing = false;
-            this.zoomInitialized = true;
-            this.sendInitResponse('OK');
+            this.joinMeeting();
           });
         },
         error: (err: unknown) => {
@@ -173,6 +171,48 @@ export class WsControlService {
         }
       });
     });
+  }
+
+  private joinMeeting(): void {
+    if (!this.zoomConfig) {
+      this.zoomInitializing = false;
+      this.sendInitResponse('ERROR', 'Zoom configuration missing for join');
+      return;
+    }
+
+    const joinOptions: Record<string, unknown> = {
+      signature: this.zoomConfig.signature,
+      meetingNumber: this.zoomConfig.meetingNumber,
+      passWord: this.zoomConfig.passWord,
+      userName: this.zoomConfig.userName,
+      sdkKey: this.zoomConfig.sdkKey,
+      success: () => {
+        this.ngZone.run(() => {
+          this.zoomInitializing = false;
+          this.zoomInitialized = true;
+          this.sendInitResponse('OK');
+        });
+      },
+      error: (err: unknown) => {
+        this.ngZone.run(() => {
+          this.zoomInitializing = false;
+          this.sendInitResponse('ERROR', this.toErrorMessage(err));
+        });
+      }
+    };
+
+    if (this.zoomConfig.tk) {
+      joinOptions['tk'] = this.zoomConfig.tk;
+      if (this.zoomConfig.userEmail) {
+        joinOptions['userEmail'] = this.zoomConfig.userEmail;
+      }
+    }
+
+    if (this.zoomConfig.zak) {
+      joinOptions['zak'] = this.zoomConfig.zak;
+    }
+
+    ZoomMtg.join(joinOptions);
   }
 
   private validateInitPayload(payload: unknown): ZoomInitPayload | null {
@@ -192,6 +232,11 @@ export class WsControlService {
     const missing = required.filter((field) => !candidate[field]);
     if (missing.length > 0) {
       this.sendInitResponse('ERROR', `Missing required fields: ${missing.join(', ')}`);
+      return null;
+    }
+
+    if (candidate.tk && !candidate.userEmail) {
+      this.sendInitResponse('ERROR', 'userEmail is required when tk is provided');
       return null;
     }
 
