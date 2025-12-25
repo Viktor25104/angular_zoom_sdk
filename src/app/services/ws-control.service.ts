@@ -310,11 +310,27 @@ export class WsControlService {
     if (!this.zoomInitializing || this.zoomInitialized) {
       return;
     }
+    this.initTimeoutHandle = null;
+
+    if (this.hasZoomDomContent()) {
+      console.log('[WS] INIT timeout skipped: Zoom UI detected');
+      return;
+    }
+
     this.zoomInitializing = false;
     this.sendInitResponse('ERROR', 'SDK not loaded', true);
   }
 
   private setStatus(status: WsStatus): void {
     this.status.set(status);
+  }
+
+  private hasZoomDomContent(): boolean {
+    const root = document.getElementById('zmmtg-root');
+    if (!root) {
+      return false;
+    }
+    const html = root.innerHTML?.trim();
+    return !!html;
   }
 }
