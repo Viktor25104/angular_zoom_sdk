@@ -205,7 +205,7 @@ export class WsControlService {
     };
 
     if (error) {
-      message.error = error;
+      message['error'] = error;
     }
 
     this.sendMessage(message);
