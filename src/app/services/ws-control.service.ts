@@ -1,5 +1,6 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import { ZoomMtg } from '@zoom/meetingsdk';
+import { ConsoleBufferService } from './console-buffer.service';
 
 type WsStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -33,8 +34,12 @@ export class WsControlService {
   private zoomConfig?: ZoomInitPayload;
   private zoomInitialized = false;
   private zoomInitializing = false;
+  private initTimeoutHandle: number | null = null;
 
-  constructor(private readonly ngZone: NgZone) {
+  constructor(
+    private readonly ngZone: NgZone,
+    private readonly consoleBuffer: ConsoleBufferService
+  ) {
     this.openSocket();
   }
 
@@ -123,12 +128,12 @@ export class WsControlService {
 
   private handleInitCommand(payload: unknown): void {
     if (this.zoomInitializing) {
-      this.sendInitResponse('ERROR', 'Zoom SDK initialization already in progress');
+      this.sendInitResponse('ERROR', 'Zoom SDK initialization already in progress', true);
       return;
     }
 
     if (this.zoomInitialized) {
-      this.sendInitResponse('ERROR', 'Zoom SDK already initialized');
+      this.sendInitResponse('ERROR', 'Zoom SDK already initialized', true);
       return;
     }
 
@@ -139,6 +144,7 @@ export class WsControlService {
 
     this.zoomConfig = validatedPayload;
     this.zoomInitializing = true;
+    this.armInitTimeout();
 
     this.ngZone.runOutsideAngular(() => {
       try {
@@ -149,7 +155,8 @@ export class WsControlService {
       } catch (err) {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
-          this.sendInitResponse('ERROR', this.toErrorMessage(err));
+          this.clearInitTimeout();
+          this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
         });
         return;
       }
@@ -166,7 +173,8 @@ export class WsControlService {
         error: (err: unknown) => {
           this.ngZone.run(() => {
             this.zoomInitializing = false;
-            this.sendInitResponse('ERROR', this.toErrorMessage(err));
+            this.clearInitTimeout();
+            this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
           });
         }
       });
@@ -176,7 +184,8 @@ export class WsControlService {
   private joinMeeting(): void {
     if (!this.zoomConfig) {
       this.zoomInitializing = false;
-      this.sendInitResponse('ERROR', 'Zoom configuration missing for join');
+      this.clearInitTimeout();
+      this.sendInitResponse('ERROR', 'Zoom configuration missing for join', true);
       return;
     }
 
@@ -190,13 +199,15 @@ export class WsControlService {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
           this.zoomInitialized = true;
+          this.clearInitTimeout();
           this.sendInitResponse('OK');
         });
       },
       error: (err: unknown) => {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
-          this.sendInitResponse('ERROR', this.toErrorMessage(err));
+          this.clearInitTimeout();
+          this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
         });
       }
     };
@@ -217,7 +228,7 @@ export class WsControlService {
 
   private validateInitPayload(payload: unknown): ZoomInitPayload | null {
     if (!payload || typeof payload !== 'object') {
-      this.sendInitResponse('ERROR', 'INIT payload must be an object');
+      this.sendInitResponse('ERROR', 'INIT payload must be an object', true);
       return null;
     }
 
@@ -231,19 +242,19 @@ export class WsControlService {
     ];
     const missing = required.filter((field) => !candidate[field]);
     if (missing.length > 0) {
-      this.sendInitResponse('ERROR', `Missing required fields: ${missing.join(', ')}`);
+      this.sendInitResponse('ERROR', `Missing required fields: ${missing.join(', ')}`, true);
       return null;
     }
 
     if (candidate.tk && !candidate.userEmail) {
-      this.sendInitResponse('ERROR', 'userEmail is required when tk is provided');
+      this.sendInitResponse('ERROR', 'userEmail is required when tk is provided', true);
       return null;
     }
 
     return candidate as ZoomInitPayload;
   }
 
-  private sendInitResponse(status: 'OK' | 'ERROR', error?: string): void {
+  private sendInitResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
     const message: Record<string, unknown> = {
       type: 'INIT_DONE',
       status
@@ -254,6 +265,17 @@ export class WsControlService {
     }
 
     this.sendMessage(message);
+
+    if (includeLogs) {
+      this.sendConsoleDump();
+    }
+  }
+
+  private sendConsoleDump(): void {
+    this.sendMessage({
+      type: 'CONSOLE_DUMP',
+      logs: this.consoleBuffer.getLogs()
+    });
   }
 
   private toErrorMessage(err: unknown): string {
@@ -261,6 +283,26 @@ export class WsControlService {
       return err.message;
     }
     return typeof err === 'string' ? err : 'Unknown Zoom SDK error';
+  }
+
+  private armInitTimeout(): void {
+    this.clearInitTimeout();
+    this.initTimeoutHandle = window.setTimeout(() => this.onInitTimeout(), 5000);
+  }
+
+  private clearInitTimeout(): void {
+    if (this.initTimeoutHandle !== null) {
+      clearTimeout(this.initTimeoutHandle);
+      this.initTimeoutHandle = null;
+    }
+  }
+
+  private onInitTimeout(): void {
+    if (!this.zoomInitializing || this.zoomInitialized) {
+      return;
+    }
+    this.zoomInitializing = false;
+    this.sendInitResponse('ERROR', 'SDK not loaded', true);
   }
 
   private setStatus(status: WsStatus): void {
