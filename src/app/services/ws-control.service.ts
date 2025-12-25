@@ -180,7 +180,7 @@ export class WsControlService {
       return;
     }
 
-    const joinOptions: Record<string, unknown> = {
+    const joinOptions: Parameters<typeof ZoomMtg.join>[0] = {
       signature: this.zoomConfig.signature,
       meetingNumber: this.zoomConfig.meetingNumber,
       passWord: this.zoomConfig.passWord,
