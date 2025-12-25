@@ -1,6 +1,6 @@
 import { Injectable, NgZone, signal } from '@angular/core';
 import { ZoomMtg } from '@zoom/meetingsdk';
-import { ConsoleBufferService } from './console-buffer.service';
+import { ConsoleBufferService, ConsoleLogEntry } from './console-buffer.service';
 
 type WsStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -272,9 +272,18 @@ export class WsControlService {
   }
 
   private sendConsoleDump(): void {
+    const logs = this.consoleBuffer.getLogs();
+    const formattedLogs = logs.map(entry => ({
+      timestamp: entry.timestamp,
+      level: entry.level.toUpperCase(),
+      message: entry.message.map(msg =>
+        typeof msg === 'string' ? msg : JSON.stringify(msg)
+      ).join(' ')
+    }));
+
     this.sendMessage({
       type: 'CONSOLE_DUMP',
-      logs: this.consoleBuffer.getLogs()
+      logs : formattedLogs
     });
   }
 

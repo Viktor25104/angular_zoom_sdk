@@ -2,11 +2,17 @@ import { Injectable } from '@angular/core';
 
 type ConsoleMethod = 'log' | 'error' | 'warn' | 'info';
 
+export interface ConsoleLogEntry {
+  timestamp: string;
+  level: ConsoleMethod;
+  message: unknown[];
+}
+
 @Injectable({
   providedIn: 'root'
 })
 export class ConsoleBufferService {
-  private readonly buffer: string[] = [];
+  private readonly buffer: ConsoleLogEntry[] = [];
   private readonly maxEntries = 500;
 
   constructor() {
@@ -16,8 +22,8 @@ export class ConsoleBufferService {
     this.patchConsole('info');
   }
 
-  getLogs(): string {
-    return this.buffer.join('\n');
+  getLogs(): ConsoleLogEntry[] {
+    return [...this.buffer];
   }
 
   private patchConsole(method: ConsoleMethod): void {
@@ -29,22 +35,14 @@ export class ConsoleBufferService {
     };
   }
 
-  private record(level: string, args: unknown[]): void {
-    const formatted = args.map((arg) => this.stringify(arg)).join(' ');
-    this.buffer.push(`[${new Date().toISOString()}][${level.toUpperCase()}] ${formatted}`);
+  private record(level: ConsoleMethod, args: unknown[]): void {
+    this.buffer.push({
+      timestamp: new Date().toISOString(),
+      level,
+      message: args
+    });
     if (this.buffer.length > this.maxEntries) {
       this.buffer.shift();
-    }
-  }
-
-  private stringify(value: unknown): string {
-    if (typeof value === 'string') {
-      return value;
-    }
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
     }
   }
 }
