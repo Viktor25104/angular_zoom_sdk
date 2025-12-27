@@ -1,7 +1,6 @@
 import { Inject, Injectable, NgZone, signal } from '@angular/core';
 import { WsStatus } from '../../runtime/dto/ws-message.dto';
 import { CLIENT_ENV, ClientEnv } from '../../infrastructure/config/env';
-import { LOGGER_PORT } from '../../infrastructure/config/dependency-injection';
 import { LoggerPort } from '../../domain/ports/logger.port';
 
 type MessageHandler = (raw: string) => void;
@@ -21,7 +20,7 @@ export class WebsocketGatewayService {
   constructor(
     private readonly ngZone: NgZone,
     @Inject(CLIENT_ENV) private readonly env: ClientEnv,
-    @Inject(LOGGER_PORT) private readonly logger: LoggerPort
+    private readonly logger: LoggerPort
   ) {
     this.connect();
   }
@@ -33,7 +32,7 @@ export class WebsocketGatewayService {
     this.createSocket();
   }
 
-  send(message: Record<string, unknown>): void {
+  send(message: unknown): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       this.logger.warn('ws_send_skipped_socket_closed', {
         readyState: this.socket?.readyState ?? 'no_socket',

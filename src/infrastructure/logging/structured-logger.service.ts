@@ -13,8 +13,10 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 @Injectable({
   providedIn: 'root'
 })
-export class StructuredLoggerService implements LoggerPort {
-  constructor(@Inject(CLIENT_ENV) private readonly env: ClientEnv) {}
+export class StructuredLoggerService extends LoggerPort {
+  constructor(@Inject(CLIENT_ENV) private readonly env: ClientEnv) {
+    super();
+  }
 
   trace(message: string, context?: LogContext): void {
     this.log('trace', message, context);

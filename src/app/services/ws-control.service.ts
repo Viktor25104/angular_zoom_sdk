@@ -1,6 +1,6 @@
 import { Injectable, computed } from '@angular/core';
 import { WebsocketGatewayService } from '../../api/websocket/websocket-gateway.service';
-import { MeetingApplicationService } from '../../runtime/application-service';
+import { WebsocketCommandController } from '../../api/websocket/websocket-command.controller';
 import { WsStatus } from '../../runtime/dto/ws-message.dto';
 
 @Injectable({
@@ -11,8 +11,6 @@ export class WsControlService {
 
   constructor(
     private readonly gateway: WebsocketGatewayService,
-    private readonly runtime: MeetingApplicationService
-  ) {
-    this.runtime.start();
-  }
+    private readonly _controller: WebsocketCommandController
+  ) {}
 }

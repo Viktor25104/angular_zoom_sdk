@@ -1,12 +1,14 @@
 import { Inject, Injectable, NgZone } from '@angular/core';
+import { Observable, Subject } from 'rxjs';
 import { LoggerPort } from '../domain/ports/logger.port';
-import { LOGGER_PORT } from '../infrastructure/config/dependency-injection';
-import { LogBufferPort } from '../domain/ports/log-buffer.port';
+import { LogBufferPort, LogEntry } from '../domain/ports/log-buffer.port';
 import { ZoomSdkPort } from '../domain/ports/zoom-sdk.port';
 import { ZoomInitOptions, ZoomInitPayload } from '../domain/value-objects/zoom-config';
 import { SchedulerPort } from '../domain/ports/scheduler.port';
-import { WebsocketGatewayService } from '../api/websocket/websocket-gateway.service';
-import { WsCommand } from './dto/ws-message.dto';
+import { ValidationError } from '../domain/errors/validation.error';
+import { ZoomError } from '../domain/errors/zoom.error';
+import { DomError } from '../domain/errors/dom.error';
+import { RuntimeEvent } from './dto/runtime-event';
 
 @Injectable({
   providedIn: 'root'
@@ -22,138 +24,82 @@ export class MeetingApplicationService {
   private chatMonitorStarted = false;
   private chatTipObserver?: MutationObserver;
   private lastChatTipSignature: { node: HTMLElement; text: string; timestamp: number } | null = null;
+  private initCompletionResolve?: () => void;
+  private initCompletionReject?: (err: Error) => void;
 
-  private initialized = false;
+  private readonly events = new Subject<RuntimeEvent>();
 
   constructor(
-    private readonly gateway: WebsocketGatewayService,
     private readonly ngZone: NgZone,
-    @Inject(LogBufferPort) private readonly logBuffer: LogBufferPort,
     @Inject(ZoomSdkPort) private readonly zoom: ZoomSdkPort,
     @Inject(SchedulerPort) private readonly scheduler: SchedulerPort,
-    @Inject(LOGGER_PORT) private readonly logger: LoggerPort
+    @Inject(LogBufferPort) private readonly logBuffer: LogBufferPort,
+    private readonly logger: LoggerPort
   ) {}
 
-  start(): void {
-    if (this.initialized) {
-      return;
-    }
-    this.initialized = true;
-    this.gateway.connect();
-    this.gateway.onOpen(() => this.sendHello());
-    this.gateway.onMessage((raw) => this.handleRawMessage(raw));
+  events$(): Observable<RuntimeEvent> {
+    return this.events.asObservable();
   }
 
-  private sendHello(): void {
-    this.logger.debug('ws_hello_send');
-    this.gateway.send({ type: 'HELLO_FROM_ANGULAR' });
+  getLogs(): LogEntry[] {
+    return this.logBuffer.getLogs();
   }
 
-  private sendMessage(message: Record<string, unknown>): void {
-    this.gateway.send(message);
-  }
-
-  private handleRawMessage(raw: string): void {
-    this.logger.debug('ws_message_received');
-    const command = this.parseCommand(raw);
-    if (!command) {
-      return;
-    }
-    this.logger.debug('ws_command_routed', { type: command.type });
-    this.routeCommand(command);
-  }
-
-  private parseCommand(raw: string): WsCommand | null {
-    try {
-      return JSON.parse(raw) as WsCommand;
-    } catch (err) {
-      this.logger.error('ws_parse_failed', {
-        message: err instanceof Error ? err.message : 'unknown_parse_error'
-      });
-      return null;
-    }
-  }
-
-  private routeCommand(command: WsCommand): void {
-    this.logger.debug('ws_command_routed', { type: command.type });
-    switch (command.type) {
-      case 'INIT':
-        this.handleInitCommand(command.payload);
-        break;
-      case 'JOIN':
-        void this.handleJoinCommand();
-        break;
-      case 'SEND':
-        void this.handleSendCommand(command.payload);
-        break;
-      case 'PARTICIPANTS':
-        this.handleParticipantsCommand();
-        break;
-      case 'OPEN_PARTICIPANTS_PANEL':
-        void this.handleOpenParticipantsPanelCommand();
-        break;
-      case 'LEAVE_MEETING':
-        void this.handleLeaveMeetingCommand();
-        break;
-      default:
-        break;
-    }
-  }
-
-  private handleInitCommand(payload: unknown): void {
+  async init(rawPayload: unknown): Promise<void> {
+    this.logger.info('init_command_received');
     if (this.zoomInitializing) {
-      this.sendInitResponse('ERROR', 'Zoom SDK initialization already in progress', true);
-      return;
+      throw new ZoomError('zoom_init_failed', 'Zoom SDK initialization already in progress');
     }
-
     if (this.zoomInitialized) {
-      this.sendInitResponse('ERROR', 'Zoom SDK already initialized', true);
-      return;
+      throw new ZoomError('zoom_init_failed', 'Zoom SDK already initialized');
     }
 
-    const validatedPayload = this.validateInitPayload(payload);
-    if (!validatedPayload) {
-      return;
-    }
-
-    this.zoomConfig = validatedPayload;
+    const payload = this.validateInitPayload(rawPayload);
+    this.zoomConfig = payload;
     this.zoomInitializing = true;
     this.armInitTimeout();
 
-    this.ngZone.runOutsideAngular(() => {
-      try {
-        this.zoom.prepareClient();
-      } catch (err) {
-        this.ngZone.run(() => {
-          this.zoomInitializing = false;
-          this.clearInitTimeout();
-          this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
-        });
-        return;
-      }
+    const completionPromise = new Promise<void>((resolve, reject) => {
+      this.initCompletionResolve = resolve;
+      this.initCompletionReject = reject;
+    });
 
-      this.zoom
-        .init(this.getZoomInitOptions())
-        .then(() => {
-          this.ngZone.run(() => {
-            this.joinMeeting();
-          });
-        })
-        .catch((err: unknown) => {
+    await new Promise<void>((resolve, reject) => {
+      this.ngZone.runOutsideAngular(() => {
+        try {
+          this.zoom.prepareClient();
+          this.zoom
+            .init(this.getZoomInitOptions())
+            .then(() => {
+              this.ngZone.run(() => {
+                this.startJoinFlow();
+                resolve();
+              });
+            })
+            .catch((err) => {
+              this.ngZone.run(() => {
+                this.zoomInitializing = false;
+                this.clearInitTimeout();
+                reject(new ZoomError('zoom_init_failed', this.toErrorMessage(err)));
+              });
+            });
+        } catch (err) {
           this.ngZone.run(() => {
             this.zoomInitializing = false;
             this.clearInitTimeout();
-            this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
+            reject(new ZoomError('zoom_init_failed', this.toErrorMessage(err)));
           });
-        });
+        }
+      });
     });
+
+    await completionPromise;
+    this.logger.info('init_command_completed');
   }
 
-  private async handleJoinCommand(): Promise<void> {
-    if (!this.zoomInitialized) {
-      this.sendJoinResponse('ERROR', 'Zoom SDK not initialized', true);
-      return;
-    }
+  async join(): Promise<void> {
+    this.logger.info('join_command_received');
+    this.ensureZoomReady();
 
     try {
       const audioButton = await this.waitForElement<HTMLButtonElement>('#preview-audio-control-button');
@@ -166,23 +112,16 @@ export class MeetingApplicationService {
       joinButton.click();
       this.startMeetingStateWatch();
       this.startChatMonitor();
-
-      this.sendJoinResponse('OK');
+      this.logger.info('join_command_completed');
     } catch (err) {
-      this.sendJoinResponse('ERROR', this.toErrorMessage(err), true);
+      throw new DomError('dom_selector_not_found', this.toErrorMessage(err));
     }
   }
 
-  private async handleSendCommand(payload: unknown): Promise<void> {
-    if (!this.zoomInitialized) {
-      this.sendSendResponse('ERROR', 'Zoom SDK not initialized', true);
-      return;
-    }
-
-    const message = this.validateSendPayload(payload);
-    if (!message) {
-      return;
-    }
+  async sendChat(rawPayload: unknown): Promise<void> {
+    this.logger.info('send_command_received');
+    this.ensureZoomReady();
+    const message = this.validateSendPayload(rawPayload);
 
     try {
       await this.ensureChatPanelOpen();
@@ -193,71 +132,55 @@ export class MeetingApplicationService {
       sendButton.click();
 
       await this.closeChatPanel();
-      this.sendSendResponse('OK');
+      this.logger.info('send_command_completed');
     } catch (err) {
-      this.sendSendResponse('ERROR', this.toErrorMessage(err), true);
+      throw new DomError('dom_selector_not_found', this.toErrorMessage(err));
     }
   }
 
-  private handleParticipantsCommand(): void {
-    if (!this.zoomInitialized) {
-      this.sendParticipantsResponse('ERROR', undefined, 'Zoom SDK not initialized', true);
-      return;
-    }
-
+  async getParticipantsCount(): Promise<number> {
+    this.logger.debug('participants_command_received');
+    this.ensureZoomReady();
     const countElement = document.querySelector('.footer-button__number-counter span');
     if (!countElement) {
-      this.sendParticipantsResponse('ERROR', undefined, 'Participants indicator not found', true);
-      return;
+      throw new DomError('dom_selector_not_found', 'Participants indicator not found');
     }
 
     const parsed = Number(countElement.textContent?.trim());
     if (Number.isNaN(parsed)) {
-      this.sendParticipantsResponse('ERROR', undefined, 'Unable to parse participant count', true);
-      return;
+      throw new ValidationError('Unable to parse participant count');
     }
 
-    this.sendParticipantsResponse('OK', parsed);
+    this.logger.debug('participants_command_completed', { count: parsed });
+    return parsed;
   }
 
-  private async handleOpenParticipantsPanelCommand(): Promise<void> {
-    if (!this.zoomInitialized) {
-      this.sendParticipantsPanelResponse('ERROR', 'Zoom SDK not initialized', true);
+  async openParticipantsPanel(): Promise<void> {
+    this.logger.info('open_participants_panel_command_received');
+    this.ensureZoomReady();
+    const button = await this.waitForElement<HTMLButtonElement>(
+      'button.footer-button-base__button[aria-label*="participants"]'
+    );
+    if (this.isParticipantsPanelVisible(button)) {
       return;
     }
 
-    try {
-      const participantsButton = await this.waitForElement<HTMLButtonElement>(
-        'button.footer-button-base__button[aria-label*="manage participants list pane"]'
-      );
-
-      if (!this.isParticipantsPanelVisible(participantsButton)) {
-        participantsButton.click();
-        await this.waitForParticipantsPanelOpen(participantsButton);
-      }
-
-      this.sendParticipantsPanelResponse('OK');
-    } catch (err) {
-      this.sendParticipantsPanelResponse('ERROR', this.toErrorMessage(err), true);
-    }
+    button.click();
+    await this.waitForParticipantsPanelOpen(button);
+    this.logger.info('open_participants_panel_command_completed');
   }
 
-  private async handleLeaveMeetingCommand(): Promise<void> {
-    if (!this.zoomInitialized) {
-      this.sendLeaveMeetingResponse('ERROR', 'Zoom SDK not initialized', true);
-      return;
-    }
-
+  async leaveMeeting(): Promise<void> {
+    this.logger.info('leave_command_received');
+    this.ensureZoomReady();
     try {
       const leaveButton = this.findLeaveButton();
       if (!leaveButton) {
-        throw new Error('Leave button not found');
+        throw new DomError('dom_selector_not_found', 'Leave button not found');
       }
 
       leaveButton.click();
-      const confirmButton = await this.waitForElement<HTMLButtonElement>(
-        '.leave-meeting-options__btn--danger'
-      );
+      const confirmButton = await this.waitForElement<HTMLButtonElement>('.leave-meeting-options__btn--danger');
       confirmButton.click();
 
       this.zoomInitialized = false;
@@ -267,38 +190,84 @@ export class MeetingApplicationService {
       this.stopChatMonitor();
       this.disposeMeetingStateObserver();
       this.chatPanelOpen = false;
-
-      this.sendLeaveMeetingResponse('OK');
+      this.logger.info('leave_command_completed');
     } catch (err) {
-      this.sendLeaveMeetingResponse('ERROR', this.toErrorMessage(err), true);
+      if (err instanceof DomError) {
+        throw err;
+      }
+      throw new DomError('dom_selector_not_found', this.toErrorMessage(err));
     }
   }
 
-  private joinMeeting(): void {
+  private ensureZoomReady(): void {
+    if (!this.zoomInitialized) {
+      throw new ZoomError('zoom_not_initialized', 'Zoom SDK not initialized');
+    }
+  }
+
+  private startJoinFlow(): void {
     if (!this.zoomConfig) {
-      this.zoomInitializing = false;
-      this.clearInitTimeout();
-      this.sendInitResponse('ERROR', 'Zoom configuration missing for join', true);
+      this.rejectInitCompletion(new ZoomError('zoom_init_failed', 'Zoom configuration missing for join'));
       return;
     }
 
     this.zoom
       .join(this.zoomConfig)
       .then(() => {
-        this.ngZone.run(() => {
-          this.zoomInitializing = false;
-          this.zoomInitialized = true;
-          this.clearInitTimeout();
-          this.sendInitResponse('OK');
-        });
+        this.zoomInitializing = false;
+        this.zoomInitialized = true;
+        this.clearInitTimeout();
+        this.resolveInitCompletion();
       })
       .catch((err: unknown) => {
-        this.ngZone.run(() => {
-          this.zoomInitializing = false;
-          this.clearInitTimeout();
-          this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
-        });
+        this.zoomInitializing = false;
+        this.clearInitTimeout();
+        this.rejectInitCompletion(new ZoomError('zoom_join_failed', this.toErrorMessage(err)));
       });
+  }
+
+  private validateInitPayload(payload: unknown): ZoomInitPayload {
+    if (!payload || typeof payload !== 'object') {
+      throw new ValidationError('INIT payload must be an object');
+    }
+
+    const candidate = payload as Partial<ZoomInitPayload>;
+    const required: Array<keyof ZoomInitPayload> = ['sdkKey', 'signature', 'meetingNumber', 'passWord', 'userName'];
+    const missing = required.filter((key) => !candidate[key] || typeof candidate[key] !== 'string');
+    if (missing.length > 0) {
+      throw new ValidationError(`Missing required fields: ${missing.join(', ')}`);
+    }
+
+    if (candidate.tk && !candidate.userEmail) {
+      throw new ValidationError('userEmail is required when tk is provided');
+    }
+
+    return candidate as ZoomInitPayload;
+  }
+
+  private validateSendPayload(payload: unknown): string {
+    if (!payload || typeof payload !== 'object') {
+      throw new ValidationError('SEND payload must be an object');
+    }
+
+    const candidate = payload as { message?: unknown };
+    if (typeof candidate.message !== 'string') {
+      throw new ValidationError('SEND payload must include a message string');
+    }
+
+    const trimmed = candidate.message.trim();
+    if (!trimmed) {
+      throw new ValidationError('Message cannot be empty');
+    }
+
+    return trimmed;
+  }
+
+  private toErrorMessage(err: unknown): string {
+    if (err instanceof Error) {
+      return err.message;
+    }
+    return typeof err === 'string' ? err : 'Unknown error';
   }
 
   private getZoomInitOptions(): ZoomInitOptions {
@@ -307,168 +276,6 @@ export class MeetingApplicationService {
       disableCORP: true,
       isSupportAV: true
     };
-  }
-
-  private validateInitPayload(payload: unknown): ZoomInitPayload | null {
-    if (!payload || typeof payload !== 'object') {
-      this.sendInitResponse('ERROR', 'INIT payload must be an object', true);
-      return null;
-    }
-
-    const candidate = payload as Partial<ZoomInitPayload>;
-    const required: Array<keyof ZoomInitPayload> = [
-      'sdkKey',
-      'signature',
-      'meetingNumber',
-      'passWord',
-      'userName'
-    ];
-    const missing = required.filter((field) => !candidate[field]);
-    if (missing.length > 0) {
-      this.sendInitResponse('ERROR', `Missing required fields: ${missing.join(', ')}`, true);
-      return null;
-    }
-
-    if (candidate.tk && !candidate.userEmail) {
-      this.sendInitResponse('ERROR', 'userEmail is required when tk is provided', true);
-      return null;
-    }
-
-    return candidate as ZoomInitPayload;
-  }
-
-  private sendInitResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
-    const message: Record<string, unknown> = {
-      type: 'INIT_DONE',
-      status
-    };
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendJoinResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
-    const message: Record<string, unknown> = {
-      type: 'JOIN_DONE',
-      status
-    };
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendSendResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
-    const message: Record<string, unknown> = {
-      type: 'SEND_DONE',
-      status
-    };
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendParticipantsResponse(
-    status: 'OK' | 'ERROR',
-    count?: number,
-    error?: string,
-    includeLogs = false
-  ): void {
-    const message: Record<string, unknown> = {
-      type: 'PARTICIPANTS_DONE',
-      status
-    };
-
-    if (typeof count === 'number') {
-      message['count'] = count;
-    }
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendParticipantsPanelResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
-    const message: Record<string, unknown> = {
-      type: 'OPEN_PARTICIPANTS_PANEL_DONE',
-      status
-    };
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendLeaveMeetingResponse(status: 'OK' | 'ERROR', error?: string, includeLogs = false): void {
-    const message: Record<string, unknown> = {
-      type: 'LEAVE_MEETING_DONE',
-      status
-    };
-
-    if (error) {
-      message['error'] = error;
-    }
-
-    this.sendMessage(message);
-
-    if (includeLogs) {
-      this.sendConsoleDump();
-    }
-  }
-
-  private sendConsoleDump(): void {
-    const logs = this.logBuffer.getLogs();
-    const formattedLogs = logs.map(entry => ({
-      timestamp: entry.timestamp,
-      level: entry.level.toUpperCase(),
-      message: entry.message.map(msg =>
-        typeof msg === 'string' ? msg : JSON.stringify(msg)
-      ).join(' ')
-    }));
-
-    this.sendMessage({
-      type: 'CONSOLE_DUMP',
-      logs : formattedLogs
-    });
-  }
-
-  private toErrorMessage(err: unknown): string {
-    if (err instanceof Error) {
-      return err.message;
-    }
-    return typeof err === 'string' ? err : 'Unknown Zoom SDK error';
   }
 
   private armInitTimeout(): void {
@@ -490,15 +297,28 @@ export class MeetingApplicationService {
     this.initTimeoutHandle = null;
 
     if (this.hasZoomDomContent()) {
-      console.log('[WS] INIT timeout satisfied via Zoom UI render');
       this.zoomInitializing = false;
       this.zoomInitialized = true;
-      this.sendInitResponse('OK');
+      this.resolveInitCompletion();
       return;
     }
 
     this.zoomInitializing = false;
-    this.sendInitResponse('ERROR', 'SDK not loaded', true);
+    this.rejectInitCompletion(new ZoomError('zoom_init_failed', 'SDK not loaded'));
+  }
+
+  private resolveInitCompletion(): void {
+    this.initCompletionResolve?.();
+    this.initCompletionResolve = undefined;
+    this.initCompletionReject = undefined;
+  }
+
+  private rejectInitCompletion(err: Error): void {
+    if (this.initCompletionReject) {
+      this.initCompletionReject(err);
+    }
+    this.initCompletionResolve = undefined;
+    this.initCompletionReject = undefined;
   }
 
   private hasZoomDomContent(): boolean {
@@ -533,7 +353,7 @@ export class MeetingApplicationService {
           return;
         }
         if (Date.now() - start > timeout) {
-          reject(new Error('Participants panel did not open in time'));
+          reject(new DomError('dom_timeout', 'Participants panel did not open in time'));
           return;
         }
         this.scheduler.setTimeout(verify, interval);
@@ -580,11 +400,7 @@ export class MeetingApplicationService {
     }
     this.lastChatTipSignature = { node: tip, text: message, timestamp: Date.now() };
 
-    this.sendMessage({
-      type: 'CHAT_COMMAND',
-      from,
-      message
-    });
+    this.emitEvent('CHAT_COMMAND', { from, message });
   }
 
   private stopChatMonitor(): void {
@@ -604,7 +420,7 @@ export class MeetingApplicationService {
           return;
         }
         if (Date.now() - start > timeout) {
-          reject(new Error(`Element not found for selector ${selector}`));
+          reject(new DomError('dom_selector_not_found', `Element not found for selector ${selector}`));
           return;
         }
         this.scheduler.setTimeout(lookup, interval);
@@ -637,7 +453,7 @@ export class MeetingApplicationService {
           return;
         }
         if (Date.now() - start > timeout) {
-          reject(new Error(`Timed out waiting for aria-label "${desiredLabel}"`));
+          reject(new DomError('dom_timeout', `Timed out waiting for aria-label "${desiredLabel}"`));
           return;
         }
         this.scheduler.setTimeout(verify, interval);
@@ -664,7 +480,7 @@ export class MeetingApplicationService {
     const waitingRoomTip = document.querySelector('.wr-tip span');
     if (waitingRoomTip?.textContent?.includes('Waiting for the host')) {
       this.meetingStateReported = true;
-      this.sendMessage({ type: 'MEETING_STATE', state: 'WAITING_ROOM' });
+      this.emitEvent('MEETING_STATE', { state: 'WAITING_ROOM' });
       this.disposeMeetingStateObserver();
       return;
     }
@@ -673,7 +489,7 @@ export class MeetingApplicationService {
     const meetingHeader = document.querySelector('.meeting-header');
     if (endButton || meetingHeader) {
       this.meetingStateReported = true;
-      this.sendMessage({ type: 'MEETING_STATE', state: 'IN_MEETING' });
+      this.emitEvent('MEETING_STATE', { state: 'IN_MEETING' });
       this.disposeMeetingStateObserver();
       this.startChatMonitor();
     }
@@ -682,27 +498,6 @@ export class MeetingApplicationService {
   private disposeMeetingStateObserver(): void {
     this.meetingStateObserver?.disconnect();
     this.meetingStateObserver = undefined;
-  }
-
-  private validateSendPayload(payload: unknown): string | null {
-    if (!payload || typeof payload !== 'object') {
-      this.sendSendResponse('ERROR', 'SEND payload must be an object', true);
-      return null;
-    }
-
-    const candidate = payload as { message?: unknown };
-    if (typeof candidate.message !== 'string') {
-      this.sendSendResponse('ERROR', 'SEND payload must include a message string', true);
-      return null;
-    }
-
-    const trimmed = candidate.message.trim();
-    if (!trimmed) {
-      this.sendSendResponse('ERROR', 'Message cannot be empty', true);
-      return null;
-    }
-
-    return trimmed;
   }
 
   private async ensureChatPanelOpen(): Promise<void> {
@@ -741,7 +536,7 @@ export class MeetingApplicationService {
           return;
         }
         if (Date.now() - start > timeout) {
-          reject(new Error('Chat panel did not close in time'));
+          reject(new DomError('dom_timeout', 'Chat panel did not close in time'));
           return;
         }
         this.scheduler.setTimeout(verify, interval);
@@ -786,7 +581,7 @@ export class MeetingApplicationService {
           return;
         }
         if (Date.now() - start > timeout) {
-          reject(new Error('Send button not ready'));
+          reject(new DomError('dom_timeout', 'Send button not ready'));
           return;
         }
         this.scheduler.setTimeout(lookup, interval);
@@ -801,5 +596,9 @@ export class MeetingApplicationService {
 
   private get chatCloseButtonSelector(): string {
     return 'button.particpant-header__close-right[aria-label="Close"]';
+  }
+
+  private emitEvent(type: string, payload?: Record<string, unknown>): void {
+    this.events.next({ type, payload });
   }
 }

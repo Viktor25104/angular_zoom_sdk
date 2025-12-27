@@ -4,11 +4,11 @@ export interface LogContext {
   [key: string]: unknown;
 }
 
-export interface LoggerPort {
-  trace(message: string, context?: LogContext): void;
-  debug(message: string, context?: LogContext): void;
-  info(message: string, context?: LogContext): void;
-  warn(message: string, context?: LogContext): void;
-  error(message: string, context?: LogContext): void;
-  log(level: LogLevel, message: string, context?: LogContext): void;
+export abstract class LoggerPort {
+  abstract trace(message: string, context?: LogContext): void;
+  abstract debug(message: string, context?: LogContext): void;
+  abstract info(message: string, context?: LogContext): void;
+  abstract warn(message: string, context?: LogContext): void;
+  abstract error(message: string, context?: LogContext): void;
+  abstract log(level: LogLevel, message: string, context?: LogContext): void;
 }
