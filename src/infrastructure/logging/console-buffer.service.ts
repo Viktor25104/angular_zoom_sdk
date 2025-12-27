@@ -1,12 +1,6 @@
 import { Injectable } from '@angular/core';
-
+import { LogBufferPort, LogEntry } from '../../domain/ports/log-buffer.port';
 type ConsoleMethod = 'log' | 'error' | 'warn' | 'info';
-
-export interface ConsoleLogEntry {
-  timestamp: string;
-  level: ConsoleMethod;
-  message: unknown[];
-}
 
 /**
  * Buffers console output so websocket diagnostics can be retrieved via API commands.
@@ -15,18 +9,19 @@ export interface ConsoleLogEntry {
 @Injectable({
   providedIn: 'root'
 })
-export class ConsoleBufferService {
-  private readonly buffer: ConsoleLogEntry[] = [];
+export class ConsoleBufferService extends LogBufferPort {
+  private readonly buffer: LogEntry[] = [];
   private readonly maxEntries = 500;
 
   constructor() {
+    super();
     this.patchConsole('log');
     this.patchConsole('error');
     this.patchConsole('warn');
     this.patchConsole('info');
   }
 
-  getLogs(): ConsoleLogEntry[] {
+  override getLogs(): LogEntry[] {
     return [...this.buffer];
   }
 

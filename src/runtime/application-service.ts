@@ -1,21 +1,12 @@
 import { Inject, Injectable, NgZone } from '@angular/core';
-import { ZoomMtg } from '@zoom/meetingsdk';
 import { LoggerPort } from '../domain/ports/logger.port';
 import { LOGGER_PORT } from '../infrastructure/config/dependency-injection';
-import { ConsoleBufferService } from '../infrastructure/logging/console-buffer.service';
+import { LogBufferPort } from '../domain/ports/log-buffer.port';
+import { ZoomSdkPort } from '../domain/ports/zoom-sdk.port';
+import { ZoomInitOptions, ZoomInitPayload } from '../domain/value-objects/zoom-config';
+import { SchedulerPort } from '../domain/ports/scheduler.port';
 import { WebsocketGatewayService } from '../api/websocket/websocket-gateway.service';
 import { WsCommand } from './dto/ws-message.dto';
-
-interface ZoomInitPayload {
-  sdkKey: string;
-  signature: string;
-  meetingNumber: string;
-  passWord: string;
-  userName: string;
-  userEmail?: string;
-  tk?: string;
-  zak?: string;
-}
 
 @Injectable({
   providedIn: 'root'
@@ -37,7 +28,9 @@ export class MeetingApplicationService {
   constructor(
     private readonly gateway: WebsocketGatewayService,
     private readonly ngZone: NgZone,
-    private readonly consoleBuffer: ConsoleBufferService,
+    @Inject(LogBufferPort) private readonly logBuffer: LogBufferPort,
+    @Inject(ZoomSdkPort) private readonly zoom: ZoomSdkPort,
+    @Inject(SchedulerPort) private readonly scheduler: SchedulerPort,
     @Inject(LOGGER_PORT) private readonly logger: LoggerPort
   ) {}
 
@@ -129,10 +122,7 @@ export class MeetingApplicationService {
 
     this.ngZone.runOutsideAngular(() => {
       try {
-        ZoomMtg.preLoadWasm();
-        ZoomMtg.prepareWebSDK();
-        ZoomMtg.i18n.load('en-US');
-        ZoomMtg.i18n.reload('en-US');
+        this.zoom.prepareClient();
       } catch (err) {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
@@ -142,23 +132,20 @@ export class MeetingApplicationService {
         return;
       }
 
-      ZoomMtg.init({
-        leaveUrl: 'https://www.zoom.com/',
-        disableCORP: true,
-        isSupportAV: true,
-        success: () => {
+      this.zoom
+        .init(this.getZoomInitOptions())
+        .then(() => {
           this.ngZone.run(() => {
             this.joinMeeting();
           });
-        },
-        error: (err: unknown) => {
+        })
+        .catch((err: unknown) => {
           this.ngZone.run(() => {
             this.zoomInitializing = false;
             this.clearInitTimeout();
             this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
           });
-        }
-      });
+        });
     });
   }
 
@@ -295,41 +282,31 @@ export class MeetingApplicationService {
       return;
     }
 
-    const joinOptions: Parameters<typeof ZoomMtg.join>[0] = {
-      signature: this.zoomConfig.signature,
-      meetingNumber: this.zoomConfig.meetingNumber,
-      passWord: this.zoomConfig.passWord,
-      userName: this.zoomConfig.userName,
-      sdkKey: this.zoomConfig.sdkKey,
-      success: () => {
+    this.zoom
+      .join(this.zoomConfig)
+      .then(() => {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
           this.zoomInitialized = true;
           this.clearInitTimeout();
           this.sendInitResponse('OK');
         });
-      },
-      error: (err: unknown) => {
+      })
+      .catch((err: unknown) => {
         this.ngZone.run(() => {
           this.zoomInitializing = false;
           this.clearInitTimeout();
           this.sendInitResponse('ERROR', this.toErrorMessage(err), true);
         });
-      }
+      });
+  }
+
+  private getZoomInitOptions(): ZoomInitOptions {
+    return {
+      leaveUrl: 'https://www.zoom.com/',
+      disableCORP: true,
+      isSupportAV: true
     };
-
-    if (this.zoomConfig.tk) {
-      joinOptions['tk'] = this.zoomConfig.tk;
-      if (this.zoomConfig.userEmail) {
-        joinOptions['userEmail'] = this.zoomConfig.userEmail;
-      }
-    }
-
-    if (this.zoomConfig.zak) {
-      joinOptions['zak'] = this.zoomConfig.zak;
-    }
-
-    ZoomMtg.join(joinOptions);
   }
 
   private validateInitPayload(payload: unknown): ZoomInitPayload | null {
@@ -472,7 +449,7 @@ export class MeetingApplicationService {
   }
 
   private sendConsoleDump(): void {
-    const logs = this.consoleBuffer.getLogs();
+    const logs = this.logBuffer.getLogs();
     const formattedLogs = logs.map(entry => ({
       timestamp: entry.timestamp,
       level: entry.level.toUpperCase(),
@@ -496,12 +473,12 @@ export class MeetingApplicationService {
 
   private armInitTimeout(): void {
     this.clearInitTimeout();
-    this.initTimeoutHandle = window.setTimeout(() => this.onInitTimeout(), 5000);
+    this.initTimeoutHandle = this.scheduler.setTimeout(() => this.onInitTimeout(), 5000);
   }
 
   private clearInitTimeout(): void {
     if (this.initTimeoutHandle !== null) {
-      clearTimeout(this.initTimeoutHandle);
+      this.scheduler.clearTimeout(this.initTimeoutHandle);
       this.initTimeoutHandle = null;
     }
   }
@@ -559,7 +536,7 @@ export class MeetingApplicationService {
           reject(new Error('Participants panel did not open in time'));
           return;
         }
-        window.setTimeout(verify, interval);
+        this.scheduler.setTimeout(verify, interval);
       };
       verify();
     });
@@ -630,7 +607,7 @@ export class MeetingApplicationService {
           reject(new Error(`Element not found for selector ${selector}`));
           return;
         }
-        window.setTimeout(lookup, interval);
+        this.scheduler.setTimeout(lookup, interval);
       };
       lookup();
     });
@@ -663,7 +640,7 @@ export class MeetingApplicationService {
           reject(new Error(`Timed out waiting for aria-label "${desiredLabel}"`));
           return;
         }
-        window.setTimeout(verify, interval);
+        this.scheduler.setTimeout(verify, interval);
       };
       verify();
     });
@@ -767,7 +744,7 @@ export class MeetingApplicationService {
           reject(new Error('Chat panel did not close in time'));
           return;
         }
-        window.setTimeout(verify, interval);
+        this.scheduler.setTimeout(verify, interval);
       };
       verify();
     });
@@ -812,7 +789,7 @@ export class MeetingApplicationService {
           reject(new Error('Send button not ready'));
           return;
         }
-        window.setTimeout(lookup, interval);
+        this.scheduler.setTimeout(lookup, interval);
       };
       lookup();
     });
