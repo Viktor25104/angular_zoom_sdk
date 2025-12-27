@@ -9,6 +9,7 @@ import { ValidationError } from '../domain/errors/validation.error';
 import { ZoomError } from '../domain/errors/zoom.error';
 import { DomError } from '../domain/errors/dom.error';
 import { RuntimeEvent } from './dto/runtime-event';
+import { DomDriverPort, DomSelector } from '../domain/ports/dom-driver.port';
 
 @Injectable({
   providedIn: 'root'
@@ -26,6 +27,7 @@ export class MeetingApplicationService {
   private lastChatTipSignature: { node: HTMLElement; text: string; timestamp: number } | null = null;
   private initCompletionResolve?: () => void;
   private initCompletionReject?: (err: Error) => void;
+  private readonly selectors: DomSelector;
 
   private readonly events = new Subject<RuntimeEvent>();
 
@@ -34,8 +36,11 @@ export class MeetingApplicationService {
     @Inject(ZoomSdkPort) private readonly zoom: ZoomSdkPort,
     @Inject(SchedulerPort) private readonly scheduler: SchedulerPort,
     @Inject(LogBufferPort) private readonly logBuffer: LogBufferPort,
+    @Inject(DomDriverPort) private readonly dom: DomDriverPort,
     private readonly logger: LoggerPort
-  ) {}
+  ) {
+    this.selectors = this.dom.getSelectors();
+  }
 
   events$(): Observable<RuntimeEvent> {
     return this.events.asObservable();
@@ -102,13 +107,11 @@ export class MeetingApplicationService {
     this.ensureZoomReady();
 
     try {
-      const audioButton = await this.waitForElement<HTMLButtonElement>('#preview-audio-control-button');
+      const audioButton = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.previewAudio);
       await this.ensureControlButtonState(audioButton, 'Unmute');
-
-      const videoButton = await this.waitForElement<HTMLButtonElement>('#preview-video-control-button');
+      const videoButton = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.previewVideo);
       await this.ensureControlButtonState(videoButton, 'Start Video');
-
-      const joinButton = await this.waitForElement<HTMLButtonElement>('.preview-join-button');
+      const joinButton = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.previewJoin);
       joinButton.click();
       this.startMeetingStateWatch();
       this.startChatMonitor();
@@ -125,7 +128,7 @@ export class MeetingApplicationService {
 
     try {
       await this.ensureChatPanelOpen();
-      const editor = await this.waitForElement<HTMLDivElement>('.tiptap.ProseMirror[contenteditable="true"]');
+      const editor = await this.waitForSelector<HTMLDivElement>(this.selectors.chat.editor);
       this.injectMessage(editor, message);
 
       const sendButton = await this.waitForSendButton();
@@ -141,7 +144,7 @@ export class MeetingApplicationService {
   async getParticipantsCount(): Promise<number> {
     this.logger.debug('participants_command_received');
     this.ensureZoomReady();
-    const countElement = document.querySelector('.footer-button__number-counter span');
+    const countElement = this.dom.query<HTMLElement>(this.selectors.indicator.participantsCount);
     if (!countElement) {
       throw new DomError('dom_selector_not_found', 'Participants indicator not found');
     }
@@ -158,9 +161,7 @@ export class MeetingApplicationService {
   async openParticipantsPanel(): Promise<void> {
     this.logger.info('open_participants_panel_command_received');
     this.ensureZoomReady();
-    const button = await this.waitForElement<HTMLButtonElement>(
-      'button.footer-button-base__button[aria-label*="participants"]'
-    );
+    const button = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.participants);
     if (this.isParticipantsPanelVisible(button)) {
       return;
     }
@@ -180,7 +181,7 @@ export class MeetingApplicationService {
       }
 
       leaveButton.click();
-      const confirmButton = await this.waitForElement<HTMLButtonElement>('.leave-meeting-options__btn--danger');
+      const confirmButton = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.leaveConfirm);
       confirmButton.click();
 
       this.zoomInitialized = false;
@@ -335,9 +336,7 @@ export class MeetingApplicationService {
     if (label.includes('close the manage participants list pane')) {
       return true;
     }
-    return !!document.querySelector(
-      '.participants-panel, .participant-list__container, .participants-panel__inner, .participants-panel-container'
-    );
+    return !!this.dom.query(this.selectors.panel.participantsContainer);
   }
 
   private waitForParticipantsPanelOpen(
@@ -363,9 +362,7 @@ export class MeetingApplicationService {
   }
 
   private findLeaveButton(): HTMLButtonElement | null {
-    return document.querySelector<HTMLButtonElement>(
-      'button.footer-button-base__button[aria-label="End"], button.footer-button-base__button[aria-label="Leave"]'
-    );
+    return this.dom.query<HTMLButtonElement>(this.selectors.button.leaveOptions);
   }
 
   private startChatMonitor(): void {
@@ -379,7 +376,7 @@ export class MeetingApplicationService {
   }
 
   private processChatTips(): void {
-    const tips = document.querySelectorAll<HTMLElement>('.last-chat-message-tip__container');
+    const tips = this.dom.queryAll<HTMLElement>(this.selectors.chat.tipContainer);
     if (tips.length === 0) {
       return;
     }
@@ -410,23 +407,8 @@ export class MeetingApplicationService {
     this.lastChatTipSignature = null;
   }
 
-  private waitForElement<T extends Element>(selector: string, timeout = 5000, interval = 100): Promise<T> {
-    const start = Date.now();
-    return new Promise<T>((resolve, reject) => {
-      const lookup = () => {
-        const element = document.querySelector(selector) as T | null;
-        if (element) {
-          resolve(element);
-          return;
-        }
-        if (Date.now() - start > timeout) {
-          reject(new DomError('dom_selector_not_found', `Element not found for selector ${selector}`));
-          return;
-        }
-        this.scheduler.setTimeout(lookup, interval);
-      };
-      lookup();
-    });
+  private waitForSelector<T extends Element>(selector: string, timeout = 5000, interval = 100): Promise<T> {
+    return this.dom.waitForElement<T>(selector, { timeoutMs: timeout, intervalMs: interval });
   }
 
   private async ensureControlButtonState(button: HTMLButtonElement, desiredLabel: string): Promise<void> {
@@ -477,7 +459,7 @@ export class MeetingApplicationService {
       return;
     }
 
-    const waitingRoomTip = document.querySelector('.wr-tip span');
+    const waitingRoomTip = this.dom.query<HTMLElement>(this.selectors.indicator.waitingRoomTip);
     if (waitingRoomTip?.textContent?.includes('Waiting for the host')) {
       this.meetingStateReported = true;
       this.emitEvent('MEETING_STATE', { state: 'WAITING_ROOM' });
@@ -485,8 +467,8 @@ export class MeetingApplicationService {
       return;
     }
 
-    const endButton = document.querySelector('button.footer-button-base__button[aria-label="End"]');
-    const meetingHeader = document.querySelector('.meeting-header');
+    const endButton = this.dom.query<HTMLElement>(this.selectors.indicator.endButton);
+    const meetingHeader = this.dom.query<HTMLElement>(this.selectors.indicator.meetingHeader);
     if (endButton || meetingHeader) {
       this.meetingStateReported = true;
       this.emitEvent('MEETING_STATE', { state: 'IN_MEETING' });
@@ -506,11 +488,9 @@ export class MeetingApplicationService {
       return;
     }
 
-    const chatButton = await this.waitForElement<HTMLButtonElement>(
-      'button.footer-button-base__button[aria-label*="chat panel"]'
-    );
+    const chatButton = await this.waitForSelector<HTMLButtonElement>(this.selectors.button.chatToggle);
     chatButton.click();
-    await this.waitForElement<HTMLDivElement>('.tiptap.ProseMirror[contenteditable="true"]');
+    await this.waitForSelector<HTMLDivElement>(this.selectors.chat.editor);
     this.chatPanelOpen = true;
   }
 
@@ -519,7 +499,7 @@ export class MeetingApplicationService {
       return;
     }
 
-    const closeButton = document.querySelector<HTMLButtonElement>(this.chatCloseButtonSelector);
+    const closeButton = this.dom.query<HTMLButtonElement>(this.selectors.chat.closeButton);
     if (closeButton) {
       closeButton.click();
       await this.waitForChatPanelClosed();
@@ -575,7 +555,7 @@ export class MeetingApplicationService {
     const start = Date.now();
     return new Promise<HTMLButtonElement>((resolve, reject) => {
       const lookup = () => {
-        const button = document.querySelector<HTMLButtonElement>('button.chat-rtf-box__send');
+        const button = this.dom.query<HTMLButtonElement>(this.selectors.button.chatSend);
         if (button && !button.classList.contains('chat-rtf-box__send--disabled')) {
           resolve(button);
           return;
@@ -591,11 +571,7 @@ export class MeetingApplicationService {
   }
 
   private isChatPanelVisible(): boolean {
-    return !!document.querySelector('button.chat-rtf-box__send');
-  }
-
-  private get chatCloseButtonSelector(): string {
-    return 'button.particpant-header__close-right[aria-label="Close"]';
+    return !!this.dom.query(this.selectors.button.chatSend);
   }
 
   private emitEvent(type: string, payload?: Record<string, unknown>): void {
