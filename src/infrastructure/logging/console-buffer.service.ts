@@ -8,6 +8,10 @@ export interface ConsoleLogEntry {
   message: unknown[];
 }
 
+/**
+ * Buffers console output so websocket diagnostics can be retrieved via API commands.
+ * The service monkey patches the standard console methods once on construction.
+ */
 @Injectable({
   providedIn: 'root'
 })

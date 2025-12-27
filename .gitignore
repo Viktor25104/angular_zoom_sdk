@@ -34,6 +34,10 @@ testem.log
 /typings
 __screenshots__/
 
+# Local environment overrides
+.env.local
+.env.*
+
 # System files
 .DS_Store
 Thumbs.db

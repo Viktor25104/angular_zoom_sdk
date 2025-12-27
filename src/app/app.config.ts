@@ -1,4 +1,5 @@
 import { ApplicationConfig, provideBrowserGlobalErrorListeners } from '@angular/core';
+import { provideInfrastructure } from '../infrastructure/config/dependency-injection';
 
 /**
  * Centralized Angular application configuration shared across the standalone bootstrap.
@@ -7,5 +8,6 @@ import { ApplicationConfig, provideBrowserGlobalErrorListeners } from '@angular/
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
+    provideInfrastructure()
   ]
 };

@@ -1,6 +1,9 @@
-import { Injectable, NgZone, signal } from '@angular/core';
+import { Inject, Injectable, NgZone, signal } from '@angular/core';
 import { ZoomMtg } from '@zoom/meetingsdk';
-import { ConsoleBufferService } from './console-buffer.service';
+import { LoggerPort } from '../../domain/ports/logger.port';
+import { CLIENT_ENV, ClientEnv } from '../../infrastructure/config/env';
+import { LOGGER_PORT } from '../../infrastructure/config/dependency-injection';
+import { ConsoleBufferService } from '../../infrastructure/logging/console-buffer.service';
 
 type WsStatus = 'connecting' | 'connected' | 'disconnected';
 
@@ -30,7 +33,7 @@ export class WsControlService {
   readonly status = signal<WsStatus>('connecting');
 
   private socket?: WebSocket;
-  private readonly wsUrl = 'ws://localhost:8081';
+  private readonly wsUrl: string;
   private zoomConfig?: ZoomInitPayload;
   private zoomInitialized = false;
   private zoomInitializing = false;
@@ -44,8 +47,12 @@ export class WsControlService {
 
   constructor(
     private readonly ngZone: NgZone,
-    private readonly consoleBuffer: ConsoleBufferService
+    private readonly consoleBuffer: ConsoleBufferService,
+    @Inject(CLIENT_ENV) private readonly env: ClientEnv,
+    @Inject(LOGGER_PORT) private readonly logger: LoggerPort
   ) {
+    this.wsUrl = this.env.ws.url;
+    this.logger.info('ws_connecting', { url: this.wsUrl });
     this.openSocket();
   }
 
@@ -53,36 +60,42 @@ export class WsControlService {
     try {
       this.socket = new WebSocket(this.wsUrl);
     } catch (err) {
-      console.error('[WS] failed to create WebSocket instance', err);
+      this.logger.error('ws_socket_create_failed', {
+        message: err instanceof Error ? err.message : 'unknown_error'
+      });
       this.setStatus('disconnected');
       return;
     }
 
     this.socket.addEventListener('open', () => {
       this.ngZone.run(() => {
-        console.log('[WS] CONNECTED');
+        this.logger.info('ws_connected', { url: this.wsUrl });
         this.setStatus('connected');
         this.sendHello();
       });
     });
 
-    this.socket.addEventListener('close', () => {
+    this.socket.addEventListener('close', (event) => {
       this.ngZone.run(() => {
-        console.log('[WS] DISCONNECTED');
+        this.logger.warn('ws_disconnected', {
+          code: (event as CloseEvent).code,
+          reason: (event as CloseEvent).reason,
+          wasClean: (event as CloseEvent).wasClean
+        });
         this.setStatus('disconnected');
       });
     });
 
     this.socket.addEventListener('error', (event) => {
       this.ngZone.run(() => {
-        console.error('[WS] ERROR', event);
+        this.logger.error('ws_error', { event });
         this.setStatus('disconnected');
       });
     });
 
     this.socket.addEventListener('message', (event) => {
       this.ngZone.run(() => {
-        console.log('[WS] MESSAGE RECEIVED');
+        this.logger.debug('ws_message_received');
         const command = this.parseCommand(event.data);
         if (!command) {
           return;
@@ -102,7 +115,10 @@ export class WsControlService {
 
   private sendMessage(message: Record<string, unknown>): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
-      console.warn('[WS] cannot send message, socket not open', message);
+      this.logger.warn('ws_send_skipped_socket_closed', {
+        readyState: this.socket?.readyState ?? 'no_socket',
+        payload: message
+      });
       return;
     }
     this.socket.send(JSON.stringify(message));
@@ -110,19 +126,22 @@ export class WsControlService {
 
   private parseCommand(raw: unknown): WsCommand | null {
     if (typeof raw !== 'string') {
-      console.error('[WS] unexpected non-string message payload', raw);
+      this.logger.error('ws_invalid_payload_type', { payloadType: typeof raw });
       return null;
     }
 
     try {
       return JSON.parse(raw) as WsCommand;
     } catch (err) {
-      console.error('[WS] failed to parse message JSON', err);
+      this.logger.error('ws_parse_failed', {
+        message: err instanceof Error ? err.message : 'unknown_parse_error'
+      });
       return null;
     }
   }
 
   private routeCommand(command: WsCommand): void {
+    this.logger.debug('ws_command_routed', { type: command.type });
     switch (command.type) {
       case 'INIT':
         this.handleInitCommand(command.payload);
